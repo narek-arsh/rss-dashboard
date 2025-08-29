@@ -1,0 +1,37 @@
+sources:
+  - name: The Guardian – Fashion
+    url: https://www.theguardian.com/fashion/rss
+    category: Moda
+  - name: WWD – Business
+    url: https://wwd.com/business-news/feed
+    category: Moda
+  - name: Hypebeast
+    url: https://hypebeast.com/feed
+    category: Moda
+  - name: Highsnobiety
+    url: https://www.highsnobiety.com/feed/
+    category: Moda
+  - name: Rolling Stone – Music
+    url: https://www.rollingstone.com/music/feed
+    category: Música
+  - name: Pitchfork – News
+    url: https://pitchfork.com/feed/feed
+    category: Música
+  - name: El País – Cultura
+    url: https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/section/cultura/portada
+    category: Cultura/Arte
+  - name: Fine Dining Lovers
+    url: https://www.finedininglovers.com/rss
+    category: Gastronomía
+  - name: Wallpaper*
+    url: https://www.wallpaper.com/rss
+    category: Lifestyle/Lujo
+  - name: Robb Report
+    url: https://robbreport.com/feed
+    category: Lifestyle/Lujo
+  - name: Skift
+    url: https://skift.com/feed
+    category: Hospitality
+  - name: HospitalityNet
+    url: https://www.hospitalitynet.org/feed/atom.xml
+    category: Hospitality
