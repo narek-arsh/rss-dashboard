@@ -26,6 +26,19 @@ except Exception:
 st.set_page_config(page_title="Aura Trends • RSS + IA", layout="wide")
 st.title("✨ Aura Trends Dashboard")
 st.caption("Moda, música, arte/cultura, gastronomía, lifestyle/lujo y hospitality — en la nube")
+# --- TEST GEMINI KEY ---
+if "GEMINI_API_KEY" in st.secrets:
+    st.sidebar.success("🔑 Se encontró GEMINI_API_KEY en Secrets.")
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        resp = model.generate_content("Di 'Hola desde Gemini' en una frase corta, en español.")
+        st.sidebar.write("Gemini responde:", resp.text)
+    except Exception as e:
+        st.sidebar.error("Error al probar Gemini: " + str(e))
+else:
+    st.sidebar.error("❌ No se encontró GEMINI_API_KEY en Secrets.")
 
 # -------------------- Utilidades --------------------
 DEFAULT_THUMB = "https://upload.wikimedia.org/wikipedia/commons/3/3f/Placeholder_view_vector.svg"
