@@ -1,7 +1,5 @@
-# aura_trends_app.py — Aura Trends con IA (Gemini para resúmenes)
-import time
-import re
-import hashlib
+# aura_trends_app.py — Aura Trends + IA (Gemini)
+import time, re, hashlib, json
 from html import unescape
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -9,42 +7,18 @@ from typing import Dict, List, Any, Optional
 import streamlit as st
 import feedparser
 import yaml
-
-# === IA (Gemini) ===
-try:
-    import google.generativeai as genai
-    GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
-    if GEMINI_KEY:
-        genai.configure(api_key=GEMINI_KEY)
-        _GEMINI_OK = True
-    else:
-        _GEMINI_OK = False
-except Exception:
-    _GEMINI_OK = False
+import requests  # para fallback REST y/o imágenes remotas
 
 # -------------------- Config de página --------------------
 st.set_page_config(page_title="Aura Trends • RSS + IA", layout="wide")
 st.title("✨ Aura Trends Dashboard")
 st.caption("Moda, música, arte/cultura, gastronomía, lifestyle/lujo y hospitality — en la nube")
-# --- TEST GEMINI KEY ---
-if "GEMINI_API_KEY" in st.secrets:
-    st.sidebar.success("🔑 Se encontró GEMINI_API_KEY en Secrets.")
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        resp = model.generate_content("Di 'Hola desde Gemini' en una frase corta, en español.")
-        st.sidebar.write("Gemini responde:", resp.text)
-    except Exception as e:
-        st.sidebar.error("Error al probar Gemini: " + str(e))
-else:
-    st.sidebar.error("❌ No se encontró GEMINI_API_KEY en Secrets.")
 
 # -------------------- Utilidades --------------------
 DEFAULT_THUMB = "https://upload.wikimedia.org/wikipedia/commons/3/3f/Placeholder_view_vector.svg"
 
 def clean_html(raw_html: str) -> str:
-    """Elimina etiquetas HTML y decodifica entidades (&euro; -> €)."""
+    """Quita etiquetas HTML y decodifica entidades (&euro; -> €)."""
     if not raw_html:
         return ""
     text = re.sub(r"<[^>]+>", "", raw_html)
@@ -73,16 +47,12 @@ def freshness_label(epoch: Optional[int]) -> str:
 
 def first_image_from_entry(e) -> Optional[str]:
     try:
-        if hasattr(e, "media_content"):
-            mc = e.media_content
-            if isinstance(mc, list) and mc:
-                url = mc[0].get("url")
-                if url: return url
-        if hasattr(e, "media_thumbnail"):
-            mt = e.media_thumbnail
-            if isinstance(mt, list) and mt:
-                url = mt[0].get("url")
-                if url: return url
+        if hasattr(e, "media_content") and isinstance(e.media_content, list) and e.media_content:
+            url = e.media_content[0].get("url")
+            if url: return url
+        if hasattr(e, "media_thumbnail") and isinstance(e.media_thumbnail, list) and e.media_thumbnail:
+            url = e.media_thumbnail[0].get("url")
+            if url: return url
         if hasattr(e, "image") and isinstance(e.image, dict):
             url = e.image.get("href") or e.image.get("url")
             if url: return url
@@ -97,7 +67,7 @@ def chunk(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i+n]
 
-# -------------------- Carga de sources --------------------
+# -------------------- Carga de fuentes --------------------
 @st.cache_data(ttl=3600)
 def load_sources() -> List[Dict[str, str]]:
     p = Path("sources.yaml")
@@ -116,7 +86,6 @@ def load_sources() -> List[Dict[str, str]]:
 
 @st.cache_data(ttl=15 * 60)
 def fetch_feed_sanitized(url: str) -> List[Dict[str, Any]]:
-    """Devuelve dicts simples (serializables) por entrada."""
     d = feedparser.parse(url)
     items = []
     try:
@@ -136,35 +105,60 @@ def fetch_feed_sanitized(url: str) -> List[Dict[str, Any]]:
         })
     return items
 
-# -------------------- IA: resúmenes con Gemini --------------------
+# -------------------- IA (Gemini) --------------------
+GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
+_SDK_OK = False
+try:
+    import google.generativeai as genai
+    if GEMINI_KEY:
+        genai.configure(api_key=GEMINI_KEY)
+        _SDK_OK = True
+except Exception:
+    _SDK_OK = False
+
 def _hash_key(*parts: str) -> str:
     return hashlib.sha256("||".join(parts).encode("utf-8")).hexdigest()
 
-@st.cache_data(ttl=7 * 24 * 3600)  # cachea 7 días
-def ai_summarize_cached(model_name: str, title: str, summary: str, link: str) -> str:
-    """Llama a Gemini con entrada recortada y devuelve un resumen en español."""
-    if not _GEMINI_OK:
+def _rest_generate(prompt: str, model: str = "gemini-1.5-flash") -> str:
+    """Fallback REST si no está el SDK o falla la llamada."""
+    if not GEMINI_KEY:
         return ""
-    # Recorta entrada para no enviar textos enormes
-    base_text = (title + ". " + summary)[:2200]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    try:
+        r = requests.post(url, headers={"Content-Type": "application/json"},
+                          data=json.dumps(payload), timeout=20)
+        if r.status_code != 200:
+            return ""
+        data = r.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=7 * 24 * 3600)  # cachea 7 días por clave de contenido
+def ai_summarize_cached(model: str, key: str, base_text: str) -> str:
+    if not GEMINI_KEY:
+        return ""
     prompt = (
-        "Eres un analista de tendencias. Resume en una o dos frases, claras y concretas, "
-        "esta noticia para un público profesional de hospitality y lujo. Devuélvelo en español, "
-        "sin emojis, sin enlaces ni HTML:\n\n"
+        "Eres analista de tendencias. Resume en 1–2 frases claras esta noticia para un público "
+        "profesional de hospitality y lujo. Devuelve el texto en español, sin emojis, enlaces ni HTML.\n\n"
         f"{base_text}"
     )
-    model = genai.GenerativeModel(model_name)
-    resp = model.generate_content(prompt)
-    text = resp.text.strip() if hasattr(resp, "text") and resp.text else ""
-    # Post-procesado mínimo
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    if _SDK_OK:
+        try:
+            m = genai.GenerativeModel(model)
+            resp = m.generate_content(prompt)
+            return (resp.text or "").strip()
+        except Exception:
+            return _rest_generate(prompt, model=model)
+    else:
+        return _rest_generate(prompt, model=model)
 
-def ai_summary(title: str, summary: str, link: str, strength: str = "flash") -> str:
-    """Wrapper que elige el modelo y clave de caché."""
+def ai_summary(title: str, summary: str, strength: str = "flash") -> str:
     model = "gemini-1.5-flash" if strength == "flash" else "gemini-1.5-pro"
-    key = _hash_key(model, title, summary, link)
-    return ai_summarize_cached(model, title, summary, link)
+    base_text = (title + ". " + summary)[:2200]
+    key = _hash_key(model, base_text)
+    return ai_summarize_cached(model, key, base_text)
 
 # -------------------- Controles UI --------------------
 sources = load_sources()
@@ -180,20 +174,43 @@ busqueda = st.sidebar.text_input("Buscar (título/resumen)...", "")
 vista = st.sidebar.radio("Vista", ["Por fuente (expanders)", "Mezclado por fecha"])
 
 st.sidebar.divider()
-use_ai = st.sidebar.toggle("Usar IA (Gemini) para resumen", value=False,
-                           help="Actívalo para ver un 'Resumen IA' en español bajo cada tarjeta.")
-ai_model_strength = st.sidebar.radio("Modelo", ["Flash (rápido)", "Pro (más preciso)"], index=0,
-                                     help="Flash es más barato/rápido; Pro es más fino.")
+use_ai = st.sidebar.toggle("Usar IA (Gemini) para resumen", value=False)
+ai_model_strength = st.sidebar.radio("Modelo", ["Flash (rápido)", "Pro (más preciso)"], index=0)
 ai_strength_key = "flash" if ai_model_strength.startswith("Flash") else "pro"
 
-refrescar = st.sidebar.button("🔄 Refrescar todo")
-if refrescar:
-    load_sources.clear()
-    fetch_feed_sanitized.clear()
-    ai_summarize_cached.clear()
-    st.success("✅ Caché limpiada, pulsa arriba en 'Rerun' o recarga la página.")
+only_on_click = st.sidebar.toggle("Generar resúmenes solo al pulsar", value=True,
+                                  help="Ahorra cuota: solo genera cuando pulses el botón.")
+gen_now = st.sidebar.button("⚡ Generar resúmenes ahora")
+
+max_ai = st.sidebar.slider("Máx. resúmenes IA por página", 3, 60, 12, 1)
+st.sidebar.caption("Consejo: deja Flash + solo al pulsar para minimizar coste.")
+
+# Nota de estado IA
+if use_ai and not GEMINI_KEY:
+    st.warning("Has activado IA, pero no encuentro GEMINI_API_KEY en Secrets.")
+if use_ai and GEMINI_KEY and not _SDK_OK:
+    st.info("Usando Gemini por API REST (SDK no disponible).")
 
 # -------------------- Render --------------------
+def maybe_ai_summary(e, ai_counter: List[int]):
+    """Genera y pinta resumen IA si procede y si no excede el límite."""
+    if not (use_ai and GEMINI_KEY):
+        return
+    should_generate = (not only_on_click) or gen_now
+    if not should_generate:
+        return
+    if ai_counter[0] >= max_ai:
+        return
+    try:
+        resumen = ai_summary(e["title"], e["summary"], strength=ai_strength_key)
+        if resumen:
+            st.caption("Resumen IA: " + resumen)
+            ai_counter[0] += 1
+    except Exception:
+        st.caption("Resumen IA: (no disponible)")
+
+ai_count = [0]  # truco mutable para contar en closures
+
 if vista == "Por fuente (expanders)":
     for cat in sel_cats:
         st.markdown(f"## {cat}")
@@ -216,24 +233,14 @@ if vista == "Por fuente (expanders)":
                             st.image(img, use_container_width=True)
                             st.markdown(f"### {e['title']}")
                             st.caption(f"{freshness_label(e['epoch'])}" + (f" · por {e['author']}" if e['author'] else ""))
-
                             if e["summary"]:
                                 txt = e["summary"][:220] + ("..." if len(e["summary"]) > 220 else "")
                                 st.write(txt)
-
-                            # Resumen IA opcional
-                            if use_ai and _GEMINI_OK:
-                                try:
-                                    resumen = ai_summary(e["title"], e["summary"], e["link"], strength=ai_strength_key)
-                                    if resumen:
-                                        st.caption("Resumen IA: " + resumen)
-                                except Exception as ex:
-                                    st.caption("Resumen IA: (no disponible)")
-
+                            maybe_ai_summary(e, ai_count)
                             st.markdown(f"[Leer más]({e['link']})")
                 st.write("---")
 else:
-    # Mezclado
+    # Mezclado por fecha
     all_entries = []
     for src in sources:
         if src["category"] not in sel_cats:
@@ -262,22 +269,9 @@ else:
                     st.markdown(f"### {e['title']}")
                     st.caption(f"{e['_category']} · {e.get('feed_title','') or e.get('_source_name','')}"
                                f" · {freshness_label(e['epoch'])}")
-
                     if e["summary"]:
                         txt = e["summary"][:240] + ("..." if len(e["summary"]) > 240 else "")
                         st.write(txt)
-
-                    if use_ai and _GEMINI_OK:
-                        try:
-                            resumen = ai_summary(e["title"], e["summary"], e["link"], strength=ai_strength_key)
-                            if resumen:
-                                st.caption("Resumen IA: " + resumen)
-                        except Exception:
-                            st.caption("Resumen IA: (no disponible)")
-
+                    maybe_ai_summary(e, ai_count)
                     st.markdown(f"[Leer más]({e['link']})")
         st.write("---")
-
-# Nota de estado IA
-if use_ai and not _GEMINI_OK:
-    st.warning("Has activado IA, pero no encuentro GEMINI_API_KEY en Secrets.")
