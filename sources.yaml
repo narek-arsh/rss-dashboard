@@ -1,32 +1,6 @@
 sources:
-  # --- MODA ---
-  - {name: The Guardian – Fashion, url: https://www.theguardian.com/fashion/rss, category: Moda}
-  - {name: WWD – Business, url: https://wwd.com/business-news/feed, category: Moda}
-  - {name: Hypebeast, url: https://hypebeast.com/feed, category: Moda}
-  - {name: Highsnobiety, url: https://www.highsnobiety.com/feed/, category: Moda}
+  # ... (tus fuentes actuales)
 
-  # --- MÚSICA (cultura pop/indie, lanzamientos) ---
-  - {name: Rolling Stone – Music, url: https://www.rollingstone.com/music/feed, category: Música}
-  - {name: Pitchfork – News, url: https://pitchfork.com/feed/feed, category: Música}
-
-  # --- ARTE / DISEÑO / ARQUITECTURA (muy útil para “estética” y retail) ---
-  - {name: Dezeen, url: https://www.dezeen.com/feed/, category: Arte/Diseño}
-  - {name: Designboom, url: https://www.designboom.com/feed/, category: Arte/Diseño}
-
-  # --- GASTRONOMÍA (tendencias, fine dining, producto) ---
-  - {name: Fine Dining Lovers, url: https://www.finedininglovers.com/rss, category: Gastronomía}
-  - {name: Eater (global), url: https://www.eater.com/rss/index.xml, category: Gastronomía}
-  - {name: Serious Eats, url: https://www.seriouseats.com/rss.xml, category: Gastronomía}
-  # ES (culinaria)
-  - {name: 7 Caníbales (ES), url: https://www.7canibales.com/feed/, category: Gastronomía}
-  - {name: El Comidista (ES), url: https://elcomidista.elpais.com/rss/, category: Gastronomía}
-
-  # --- LIFESTYLE / LUJO ---
-  - {name: Wallpaper*, url: https://www.wallpaper.com/rss, category: Lifestyle/Lujo}
-  - {name: Robb Report, url: https://robbreport.com/feed, category: Lifestyle/Lujo}
-  - {name: Condé Nast Traveler (US), url: https://www.cntraveler.com/feed/rss, category: Lifestyle/Lujo}
-
-  # --- HOSPITALITY (negocio hotelero, travel industry) ---
-  - {name: Skift, url: https://skift.com/feed, category: Hospitality}
-  - {name: HospitalityNet, url: https://www.hospitalitynet.org/feed/atom.xml, category: Hospitality}
-  - {name: The Caterer (UK), url: https://www.thecaterer.com/rss, category: Hospitality}
+  # --- Gastronomía (scraping directo) ---
+  - {name: Gastroeconomy (scraped), url: scrape:gastroeconomy, category: Gastronomía}
+  - {name: El Comidista (scraped), url: scrape:elcomidista, category: Gastronomía}
