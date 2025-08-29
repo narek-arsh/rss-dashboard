@@ -178,7 +178,7 @@ if refrescar:
     load_sources.clear()
     fetch_feed_sanitized.clear()
     ai_summarize_cached.clear()
-    st.experimental_rerun()
+    st.success("✅ Caché limpiada, pulsa arriba en 'Rerun' o recarga la página.")
 
 # -------------------- Render --------------------
 if vista == "Por fuente (expanders)":
