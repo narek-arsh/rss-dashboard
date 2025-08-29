@@ -2,13 +2,12 @@ import time
 import feedparser
 import streamlit as st
 
-# ---------- Configuración de la página ----------
+# ---------- Config de página ----------
 st.set_page_config(page_title="Tendencias • RSS", layout="wide")
 st.title("🌍 Dashboard de Tendencias (RSS)")
-st.caption("Moda, música, arte, gastronomía, lifestyle y hospitality • Actualizado en la nube")
+st.caption("Moda, música, arte, gastronomía, lifestyle y hospitality • Online")
 
-# ---------- LISTA DE FEEDS ----------
-# Puedes añadir o quitar líneas. Formato: "Nombre visible": "URL del RSS"
+# ---------- Feeds ----------
 FEEDS = {
     "Moda": {
         "The Guardian – Fashion": "https://www.theguardian.com/fashion/rss",
@@ -36,22 +35,41 @@ FEEDS = {
     },
 }
 
-# ---------- Funciones útiles ----------
+# ---------- Utilidades ----------
+def to_epoch(tstruct):
+    """Convierte time.struct_time -> epoch (int). Si no hay fecha, None."""
+    if not tstruct:
+        return None
+    try:
+        return int(time.mktime(tstruct))
+    except Exception:
+        return None
+
 @st.cache_data(ttl=15 * 60)
-def fetch_feed(url: str):
-    """Descarga y parsea un feed RSS. Se cachea 15 min para ir ligero."""
-    return feedparser.parse(url)
+def fetch_feed_sanitized(url: str):
+    """
+    Lee el RSS y devuelve SOLO datos simples (dicts con str/int).
+    Esto evita errores de serialización (pickle) en Streamlit Cloud.
+    """
+    d = feedparser.parse(url)
+    items = []
+    for e in d.entries:
+        # Tomamos published o updated y lo pasamos a epoch (int)
+        ts = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None)
+        items.append({
+            "title": getattr(e, "title", "") or "(sin título)",
+            "summary": getattr(e, "summary", "") or "",
+            "link": getattr(e, "link", "") or "#",
+            "author": getattr(e, "author", "") or "",
+            "epoch": to_epoch(ts),
+            "source": d.feed.title if hasattr(d, "feed") and hasattr(d.feed, "title") else "",
+        })
+    return items
 
-def entry_time_struct(e):
-    """Devuelve la fecha de publicación si existe (struct_time)."""
-    return getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None)
-
-def human_timeago(ts):
-    """Convierte una fecha en 'hace X min/h/días'."""
-    if not ts:
+def human_timeago_epoch(epoch):
+    if not epoch:
         return "—"
-    published = time.mktime(ts)
-    delta = int(time.time() - published)
+    delta = int(time.time() - epoch)
     if delta < 60:
         return "hace segundos"
     if delta < 3600:
@@ -60,7 +78,7 @@ def human_timeago(ts):
         return f"hace {delta // 3600} h"
     return f"hace {delta // 86400} días"
 
-# ---------- Barra lateral (filtros) ----------
+# ---------- Sidebar ----------
 st.sidebar.header("Filtros")
 categorias = list(FEEDS.keys())
 sel_cats = st.sidebar.multiselect("Categorías", categorias, default=categorias)
@@ -68,64 +86,52 @@ max_por_fuente = st.sidebar.slider("Máximo por fuente", 3, 30, 10, 1)
 busqueda = st.sidebar.text_input("Buscar (título/resumen)...", "")
 modo = st.sidebar.radio("Modo de vista", ["Por categorías", "Todo mezclado (por fecha)"])
 
-# ---------- Pintado ----------
+# ---------- Render ----------
 if modo == "Por categorías":
     for cat in sel_cats:
         st.markdown(f"## {cat}")
         for nombre, url in FEEDS[cat].items():
-            feed = fetch_feed(url)
-            entries = feed.entries[:max_por_fuente]
+            entries = fetch_feed_sanitized(url)[:max_por_fuente]
             with st.expander(f"📡 {nombre}"):
                 if not entries:
                     st.write("Sin entradas.")
                 for e in entries:
-                    titulo = getattr(e, "title", "(sin título)")
-                    resumen = getattr(e, "summary", "")
-                    link = getattr(e, "link", "#")
-                    ts = entry_time_struct(e)
-
-                    st.markdown(f"### {titulo}")
-                    if resumen:
+                    st.markdown(f"### {e['title']}")
+                    if e["summary"]:
+                        resumen = e["summary"]
                         st.write((resumen[:400] + "...") if len(resumen) > 400 else resumen)
                     meta = []
-                    if ts: meta.append(human_timeago(ts))
-                    if hasattr(e, "author"): meta.append(f"por {e.author}")
+                    if e["epoch"]: meta.append(human_timeago_epoch(e["epoch"]))
+                    if e["author"]: meta.append(f"por {e['author']}")
                     if meta:
                         st.caption(" · ".join(meta))
-                    st.markdown(f"[Leer más]({link})")
+                    st.markdown(f"[Leer más]({e['link']})")
                     st.write("---")
-
-else:  # Todo mezclado (por fecha)
+else:
+    # Reunir todo y ordenar por fecha
     todos = []
     for cat in sel_cats:
         for nombre, url in FEEDS[cat].items():
-            feed = fetch_feed(url)
-            for e in feed.entries[:max_por_fuente]:
+            for e in fetch_feed_sanitized(url)[:max_por_fuente]:
                 todos.append((cat, nombre, e))
-
-    # Ordenar por fecha (más reciente primero). Si no hay fecha, lo manda al final.
-    todos.sort(key=lambda x: entry_time_struct(x[2]) or time.gmtime(0), reverse=True)
+    todos.sort(key=lambda x: x[2]["epoch"] or 0, reverse=True)
 
     st.markdown("## Últimas publicaciones")
     if busqueda:
         q = busqueda.lower()
         todos = [
             item for item in todos
-            if (hasattr(item[2], "title") and q in item[2].title.lower())
-            or (hasattr(item[2], "summary") and q in item[2].summary.lower())
+            if (q in item[2]["title"].lower()) or (q in item[2]["summary"].lower())
         ]
 
     for cat, fuente, e in todos:
-        titulo = getattr(e, "title", "(sin título)")
-        resumen = getattr(e, "summary", "")
-        link = getattr(e, "link", "#")
-        ts = entry_time_struct(e)
-
-        st.markdown(f"### {titulo}")
-        st.caption(f"{cat} · {fuente} · {human_timeago(ts)}")
-        if resumen:
+        st.markdown(f"### {e['title']}")
+        st.caption(f"{cat} · {fuente} · {human_timeago_epoch(e['epoch'])}")
+        if e["summary"]:
+            resumen = e["summary"]
             st.write((resumen[:400] + "...") if len(resumen) > 400 else resumen)
-        st.markdown(f"[Leer más]({link})")
+        st.markdown(f"[Leer más]({e['link']})")
         st.write("---")
 
-st.sidebar.info("Consejo: usa la vista 'Todo mezclado' y la búsqueda para detectar tendencias rápidas.")
+st.sidebar.info("Consejo: usa la vista 'Todo mezclado' + búsqueda para detectar tendencias rápidas.")
+
