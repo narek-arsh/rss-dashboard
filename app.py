@@ -1,4 +1,4 @@
-# aura_trends_app.py — Aura Trends + IA + Web Scraping
+# aura_trends_app.py — Aura Trends + IA (Gemini) + Web Scraping + Filtro de Tendencia
 import time, re, hashlib, json
 from html import unescape
 from pathlib import Path
@@ -14,7 +14,7 @@ from dateutil import parser as dateparser
 # -------------------- Config de página --------------------
 st.set_page_config(page_title="Aura Trends • RSS + IA + Scraping", layout="wide")
 st.title("✨ Aura Trends Dashboard")
-st.caption("Moda, música, arte/cultura, gastronomía, lifestyle/lujo y hospitality — RSS + Scraping + IA")
+st.caption("Moda, música, arte/diseño, gastronomía, lifestyle/lujo y hospitality — RSS + Scraping + IA")
 
 # -------------------- Utilidades --------------------
 DEFAULT_THUMB = "https://upload.wikimedia.org/wikipedia/commons/3/3f/Placeholder_view_vector.svg"
@@ -95,9 +95,34 @@ def http_get(url: str) -> Optional[str]:
         pass
     return None
 
-# -------------------- Carga de fuentes --------------------
-@st.cache_data(ttl=3600)
-def load_sources() -> List[Dict[str, str]]:
+# -------------------- Filtro de tendencia --------------------
+TREND_KEYWORDS = [
+    "restaurante", "restaurantes", "chef", "chefs", "hotel", "hoteles",
+    "apertura", "aperturas", "estrella michelin", "michelin", "lista",
+    "50 best", "oad", "galardón", "premio", "premios", "ranking", "menú degustación",
+    "sommelier", "bodega", "barra", "fine dining"
+]
+BORING_KEYWORDS = [
+    "receta", "recetas", "cómo hacer", "truco", "trucos", "paso a paso",
+    "ingredientes", "calorías", "microondas", "olla rápida"
+]
+
+def passes_trend_filter(title: str, summary: str) -> bool:
+    t = (title or "").lower()
+    s = (summary or "").lower()
+    if any(k in t or k in s for k in BORING_KEYWORDS):
+        return False
+    return any(k in t or k in s for k in TREND_KEYWORDS)
+
+# -------------------- Carga de fuentes (con invalidación por fingerprint) --------------------
+def _file_fingerprint(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    txt = path.read_text(encoding="utf-8")
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
+
+@st.cache_data(ttl=None)
+def load_sources_cached(fingerprint: str, nonce: int) -> List[Dict[str, str]]:
     p = Path("sources.yaml")
     if not p.exists():
         return []
@@ -135,101 +160,190 @@ def fetch_feed_sanitized(url: str) -> List[Dict[str, Any]]:
 
 # -------------------- Scrapers --------------------
 @st.cache_data(ttl=10 * 60)
-def scrape_gastroeconomy(max_items: int = 20) -> List[Dict[str, Any]]:
-    """Scraper simple para https://www.gastroeconomy.com/ (WordPress)."""
-    html = http_get("https://www.gastroeconomy.com/")
+def scrape_gastroeconomy(max_items: int = 24) -> List[Dict[str, Any]]:
+    url = "https://www.gastroeconomy.com/"
+    html = http_get(url)
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    scope = soup.find("main") or soup.find(id="content") or soup
+
+    items, seen = [], set()
+    for a in scope.select("h2 a, h3 a, h4 a"):
+        href = a.get("href") or ""
+        title = a.get_text(strip=True)
+        if not href or not title:
+            continue
+        if "gastroeconomy.com" not in href:
+            continue
+        if "/category/" in href or "/tag/" in href:
+            continue
+        if "/20" not in href and "/19" not in href:
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+
+        card = a
+        for _ in range(4):
+            if card.parent: card = card.parent
+
+        img_tag = card.find("img")
+        img = ""
+        if img_tag:
+            img = (img_tag.get("data-src") or img_tag.get("data-lazy-src") or
+                   img_tag.get("src") or "")
+
+        time_tag = card.find("time")
+        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
+        epoch = parse_epoch_from_str(dt)
+
+        p = card.find("p")
+        summary = clean_html(p.get_text(" ", strip=True)) if p else ""
+
+        items.append({
+            "title": title,
+            "summary": summary,
+            "link": href,
+            "author": "",
+            "epoch": epoch,
+            "image": img,
+            "feed_title": "Gastroeconomy (scraped)"
+        })
+        if len(items) >= max_items:
+            break
+    return items
+
+@st.cache_data(ttl=10 * 60)
+def scrape_elcomidista(max_items: int = 30) -> List[Dict[str, Any]]:
+    base = "https://elpais.com/gastronomia/el-comidista/"
+    html = http_get(base)
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    scope = soup.find("main") or soup
+
+    items, seen = [], set()
+    for a in scope.select("h2 a, h3 a"):
+        href = a.get("href") or ""
+        title = a.get_text(strip=True)
+        if not href or not title:
+            continue
+        if "/gastronomia/el-comidista/" not in href:
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+
+        card = a
+        for _ in range(4):
+            if card.parent: card = card.parent
+
+        img_tag = card.find("img")
+        img = img_tag.get("src") if img_tag and img_tag.get("src","").startswith("http") else ""
+
+        time_tag = card.find("time")
+        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
+        epoch = parse_epoch_from_str(dt)
+
+        p = card.find("p")
+        summary = clean_html(p.get_text(" ", strip=True)) if p else ""
+
+        items.append({
+            "title": title,
+            "summary": summary,
+            "link": href,
+            "author": "El Comidista",
+            "epoch": epoch,
+            "image": img,
+            "feed_title": "El Comidista (scraped)"
+        })
+        if len(items) >= max_items:
+            break
+    return items
+
+@st.cache_data(ttl=10 * 60)
+def scrape_50best(max_items: int = 24) -> List[Dict[str, Any]]:
+    html = http_get("https://www.theworlds50best.com/stories/")
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    items, seen = [], set()
+    for a in soup.select("a[href*='/stories/']"):
+        href = a.get("href") or ""
+        title = a.get_text(strip=True)
+        if not href or not title:
+            continue
+        if "/stories/News/" not in href and "/stories/news/" not in href:
+            continue
+        if href.startswith("/"):
+            href = "https://www.theworlds50best.com" + href
+        if href in seen:
+            continue
+        seen.add(href)
+
+        card = a
+        for _ in range(4):
+            if card.parent: card = card.parent
+        img_tag = card.find("img")
+        img = img_tag.get("src") if img_tag and img_tag.get("src","").startswith("http") else ""
+
+        time_tag = card.find("time")
+        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
+        epoch = parse_epoch_from_str(dt)
+
+        items.append({
+            "title": title,
+            "summary": "",
+            "link": href,
+            "author": "",
+            "epoch": epoch,
+            "image": img,
+            "feed_title": "50 Best (News)"
+        })
+        if len(items) >= max_items:
+            break
+    return items
+
+@st.cache_data(ttl=10 * 60)
+def scrape_michelin(max_items: int = 24) -> List[Dict[str, Any]]:
+    html = http_get("https://guide.michelin.com/us/en/articles/news-and-views")
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
     items = []
     for art in soup.select("article")[:max_items]:
-        # Título y enlace
-        a = art.select_one("h2.entry-title a, h3.entry-title a, .entry-title a, h2 a, h3 a")
+        a = art.find("a")
         if not a or not a.get("href"):
             continue
+        href = a["href"]
+        if href.startswith("/"):
+            href = "https://guide.michelin.com" + href
         title = a.get_text(strip=True)
-        link = a["href"]
-
-        # Resumen
-        sum_tag = art.select_one(".entry-summary, .post-excerpt, p")
-        summary = clean_html(sum_tag.get_text(" ", strip=True)) if sum_tag else ""
-
-        # Imagen
-        img_tag = art.find("img")
-        img = ""
-        if img_tag:
-            img = img_tag.get("data-src") or img_tag.get("data-lazy-src") or img_tag.get("src") or ""
-
-        # Fecha
         time_tag = art.find("time")
         dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
         epoch = parse_epoch_from_str(dt)
-
-        items.append({
-            "title": title or "(sin título)",
-            "summary": summary,
-            "link": link,
-            "author": "",
-            "epoch": epoch,
-            "image": img,
-            "feed_title": "Gastroeconomy (scraped)",
-        })
-    return items
-
-@st.cache_data(ttl=10 * 60)
-def scrape_elcomidista(max_items: int = 24) -> List[Dict[str, Any]]:
-    """Scraper para https://elcomidista.elpais.com/ (portada)."""
-    html = http_get("https://elcomidista.elpais.com/")
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    items = []
-    # Buscamos bloques de artículos; selector amplio para aguantar cambios
-    for art in soup.select("article, .c-card, .c")[:max_items]:
-        h = art.find(["h2", "h3"])
-        a = h.find("a") if h else None
-        if not a or not a.get("href"):
-            continue
-        title = a.get_text(strip=True)
-        link = a["href"]
-        if link.startswith("//"):
-            link = "https:" + link
-        elif link.startswith("/"):
-            link = "https://elcomidista.elpais.com" + link
-
-        # Resumen (si lo hay)
-        sum_tag = art.find("p") or art.find("div", class_="c-article-summary")
-        summary = clean_html(sum_tag.get_text(" ", strip=True)) if sum_tag else ""
-
-        # Imagen
         img_tag = art.find("img")
-        img = ""
-        if img_tag:
-            img = img_tag.get("data-src") or img_tag.get("data-lazy-src") or img_tag.get("src") or ""
-
-        # Fecha (si hay <time datetime="...">)
-        time_tag = art.find("time")
-        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
-        epoch = parse_epoch_from_str(dt)
-
+        img = img_tag.get("src") if img_tag and img_tag.get("src","").startswith("http") else ""
         items.append({
             "title": title or "(sin título)",
-            "summary": summary,
-            "link": link,
+            "summary": "",
+            "link": href,
             "author": "",
             "epoch": epoch,
             "image": img,
-            "feed_title": "El Comidista (scraped)",
+            "feed_title": "Michelin (News & Views)"
         })
     return items
 
 SCRAPERS = {
     "gastroeconomy": scrape_gastroeconomy,
     "elcomidista": scrape_elcomidista,
+    "50best": scrape_50best,
+    "michelin": scrape_michelin,
 }
 
 def fetch_source_entries(src_url: str) -> List[Dict[str, Any]]:
-    """Decide si es RSS normal o una fuente 'scrape:slug'."""
     if src_url.startswith("scrape:"):
         slug = src_url.split(":", 1)[1].strip().lower()
         func = SCRAPERS.get(slug)
@@ -294,7 +408,13 @@ def ai_summary(title: str, summary: str, strength: str = "flash") -> str:
     return ai_summarize_cached(model, key, base_text)
 
 # -------------------- Controles UI --------------------
-sources = load_sources()
+# Carga de fuentes con invalidación por fingerprint y "nonce"
+if "sources_nonce" not in st.session_state:
+    st.session_state.sources_nonce = 0
+
+finger = _file_fingerprint(Path("sources.yaml"))
+sources = load_sources_cached(finger, st.session_state.sources_nonce)
+
 if not sources:
     st.error("No encuentro `sources.yaml` en la raíz del repo. Súbelo con tus fuentes (RSS o scrape:slug).")
     st.stop()
@@ -307,22 +427,26 @@ busqueda = st.sidebar.text_input("Buscar (título/resumen)...", "")
 vista = st.sidebar.radio("Vista", ["Por fuente (expanders)", "Mezclado por fecha"])
 
 st.sidebar.divider()
+trend_only = st.sidebar.toggle("🔎 Filtrar solo piezas de TENDENCIA (beta)", value=True)
+
 use_ai = st.sidebar.toggle("Usar IA (Gemini) para resumen", value=False)
 ai_model_strength = st.sidebar.radio("Modelo", ["Flash (rápido)", "Pro (más preciso)"], index=0)
 ai_strength_key = "flash" if ai_model_strength.startswith("Flash") else "pro"
-
 only_on_click = st.sidebar.toggle("Generar resúmenes solo al pulsar", value=True,
                                   help="Ahorra cuota: solo genera cuando pulses el botón.")
 gen_now = st.sidebar.button("⚡ Generar resúmenes ahora")
-
 max_ai = st.sidebar.slider("Máx. resúmenes IA por página", 3, 60, 12, 1)
 
-# Botón de refresco integral (limpia TODAS las cachés)
-if st.sidebar.button("♻️ Limpiar caché de datos (feeds + scrapers + IA)"):
-    load_sources.clear()
+st.sidebar.divider()
+st.sidebar.button("♻️ Recargar fuentes (ignorar caché)",
+                  on_click=lambda: st.session_state.__setitem__("sources_nonce", st.session_state.sources_nonce + 1))
+if st.sidebar.button("🧹 Limpiar caché (feeds + scrapers + IA)"):
+    load_sources_cached.clear()
     fetch_feed_sanitized.clear()
     scrape_gastroeconomy.clear()
     scrape_elcomidista.clear()
+    scrape_50best.clear()
+    scrape_michelin.clear()
     ai_summarize_cached.clear()
     st.success("Caché limpiada. Pulsa Rerun (arriba) o recarga la página.")
 
@@ -331,6 +455,9 @@ if use_ai and not GEMINI_KEY:
     st.warning("Has activado IA, pero no encuentro GEMINI_API_KEY en Secrets.")
 if use_ai and GEMINI_KEY and not _SDK_OK:
     st.info("Usando Gemini por API REST (SDK no disponible).")
+
+st.sidebar.caption(f"Fuentes cargadas: {len(sources)}")
+st.sidebar.caption(f"Fingerprint: {finger[:8]}…  • nonce: {st.session_state.sources_nonce}")
 
 # -------------------- Render --------------------
 def maybe_ai_summary(e, ai_counter: List[int]):
@@ -361,9 +488,12 @@ if vista == "Por fuente (expanders)":
                 if busqueda:
                     q = busqueda.lower()
                     entries = [e for e in entries if q in e["title"].lower() or q in e["summary"].lower()]
+                if trend_only:
+                    entries = [e for e in entries if passes_trend_filter(e.get("title",""), e.get("summary",""))]
                 if not entries:
                     st.write("Sin entradas.")
                     continue
+
                 for row in chunk(entries, 3):
                     cols = st.columns(3)
                     for col, e in zip(cols, row):
@@ -392,6 +522,8 @@ else:
     if busqueda:
         q = busqueda.lower()
         all_entries = [e for e in all_entries if q in e["title"].lower() or q in e["summary"].lower()]
+    if trend_only:
+        all_entries = [e for e in all_entries if passes_trend_filter(e.get("title",""), e.get("summary",""))]
 
     all_entries.sort(key=lambda x: x["epoch"] or 0, reverse=True)
 
