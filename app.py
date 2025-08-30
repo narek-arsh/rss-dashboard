@@ -10,6 +10,7 @@ import yaml
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
+from urllib.parse import urljoin
 
 # -------------------- Config de página --------------------
 st.set_page_config(page_title="Aura Trends • RSS + IA + Scraping", layout="wide")
@@ -82,18 +83,50 @@ def first_image_from_entry(e) -> Optional[str]:
         pass
     return None
 
+def _pick_img_from_tag(img_tag, base_url=""):
+    if not img_tag:
+        return ""
+    for attr in ["data-src", "data-lazy-src", "data-original", "src"]:
+        val = img_tag.get(attr)
+        if val:
+            return urljoin(base_url, val)
+    srcset = img_tag.get("srcset")
+    if srcset:
+        first = srcset.split(",")[0].strip().split(" ")[0]
+        return urljoin(base_url, first)
+    return ""
+
 def chunk(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i+n]
 
 def http_get(url: str) -> Optional[str]:
     try:
-        r = requests.get(url, headers=HTTP_HEADERS, timeout=12)
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=14)
         if r.status_code == 200 and r.text:
             return r.text
     except Exception:
         pass
     return None
+
+@st.cache_data(ttl=6 * 3600)
+def fetch_meta_image(article_url: str) -> str:
+    """Abre la página del artículo y devuelve og:image/twitter:image (fallback a la primera <img>)."""
+    html = http_get(article_url)
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    for sel, attr in [
+        ("meta[property='og:image']", "content"),
+        ("meta[name='og:image']", "content"),
+        ("meta[name='twitter:image:src']", "content"),
+        ("meta[name='twitter:image']", "content"),
+    ]:
+        tag = soup.select_one(sel)
+        if tag and tag.get(attr):
+            return urljoin(article_url, tag.get(attr))
+    img = soup.select_one("article img, .article img, .post img, figure img")
+    return _pick_img_from_tag(img, base_url=article_url) if img else ""
 
 # -------------------- Filtro de tendencia --------------------
 TREND_KEYWORDS = [
@@ -157,42 +190,6 @@ def fetch_feed_sanitized(url: str) -> List[Dict[str, Any]]:
             "feed_title": feed_title,
         })
     return items
-from urllib.parse import urljoin
-
-def _pick_img_from_tag(img_tag, base_url=""):
-    if not img_tag:
-        return ""
-    for attr in ["data-src", "data-lazy-src", "data-original", "src"]:
-        val = img_tag.get(attr)
-        if val:
-            return urljoin(base_url, val)
-    # srcset -> coge la primera url
-    srcset = img_tag.get("srcset")
-    if srcset:
-        first = srcset.split(",")[0].strip().split(" ")[0]
-        return urljoin(base_url, first)
-    return ""
-
-@st.cache_data(ttl=6 * 3600)
-def fetch_meta_image(article_url: str) -> str:
-    """Abre la página del artículo y devuelve og:image/twitter:image (fallback a la primera <img>)."""
-    html = http_get(article_url)
-    if not html:
-        return ""
-    soup = BeautifulSoup(html, "html.parser")
-    # og/twitter
-    for sel, attr in [
-        ("meta[property='og:image']", "content"),
-        ("meta[name='og:image']", "content"),
-        ("meta[name='twitter:image:src']", "content"),
-        ("meta[name='twitter:image']", "content"),
-    ]:
-        tag = soup.select_one(sel)
-        if tag and tag.get(attr):
-            return urljoin(article_url, tag.get(attr))
-    # primera imagen del artículo
-    img = soup.select_one("article img, .article img, .post img, figure img")
-    return _pick_img_from_tag(img, base_url=article_url) if img else ""
 
 # -------------------- Scrapers --------------------
 @st.cache_data(ttl=10 * 60)
@@ -205,7 +202,6 @@ def scrape_gastroeconomy(max_items: int = 24) -> List[Dict[str, Any]]:
     scope = soup.find("main") or soup.find(id="content") or soup
 
     items, seen = [], set()
-    # En portada usan h2/h3/h4 con enlaces a artículos (las categorías/tags las filtramos)
     for a in scope.select("h2 a, h3 a, h4 a"):
         href = a.get("href") or ""
         title = a.get_text(strip=True)
@@ -215,17 +211,14 @@ def scrape_gastroeconomy(max_items: int = 24) -> List[Dict[str, Any]]:
             continue
         if "/category/" in href or "/tag/" in href or "/author/" in href:
             continue
-        # Suelen llevar año en la URL
         if "/20" not in href and "/19" not in href:
             continue
         if href in seen:
             continue
         seen.add(href)
 
-        # Imagen real desde la página del artículo (evita la misma foto en todas)
         img = fetch_meta_image(href)
 
-        # Fecha y resumen básicos desde la card
         card = a
         for _ in range(4):
             if card.parent: card = card.parent
@@ -249,6 +242,58 @@ def scrape_gastroeconomy(max_items: int = 24) -> List[Dict[str, Any]]:
     return items
 
 @st.cache_data(ttl=10 * 60)
+def scrape_elcomidista(max_items: int = 30) -> List[Dict[str, Any]]:
+    base = "https://elpais.com/gastronomia/el-comidista/"
+    html = http_get(base)
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    scope = soup.find("main") or soup
+
+    items, seen = [], set()
+    for a in scope.select("h2 a, h3 a"):
+        href = a.get("href") or ""
+        title = a.get_text(strip=True)
+        if not href or not title:
+            continue
+        if "/gastronomia/el-comidista/" not in href:
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+
+        card = a
+        for _ in range(4):
+            if card.parent: card = card.parent
+
+        img = ""
+        img_tag = card.find("img")
+        if img_tag:
+            img = _pick_img_from_tag(img_tag, base_url=href)
+        if not img:
+            img = fetch_meta_image(href)
+
+        time_tag = card.find("time")
+        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
+        epoch = parse_epoch_from_str(dt)
+
+        p = card.find("p")
+        summary = clean_html(p.get_text(" ", strip=True)) if p else ""
+
+        items.append({
+            "title": title,
+            "summary": summary,
+            "link": href,
+            "author": "El Comidista",
+            "epoch": epoch,
+            "image": img,
+            "feed_title": "El Comidista (scraped)"
+        })
+        if len(items) >= max_items:
+            break
+    return items
+
+@st.cache_data(ttl=10 * 60)
 def scrape_50best(max_items: int = 24) -> List[Dict[str, Any]]:
     candidate_pages = [
         "https://www.theworlds50best.com/stories/news",
@@ -262,7 +307,6 @@ def scrape_50best(max_items: int = 24) -> List[Dict[str, Any]]:
             continue
         soup = BeautifulSoup(html, "html.parser")
 
-        # Anchors a stories (relajamos el filtro a cualquier /stories/)
         for a in soup.select("a[href*='/stories/']"):
             href = a.get("href") or ""
             title = a.get_text(strip=True)
@@ -270,14 +314,12 @@ def scrape_50best(max_items: int = 24) -> List[Dict[str, Any]]:
                 continue
             if href.startswith("/"):
                 href = urljoin("https://www.theworlds50best.com", href)
-            # Evita repes y listados no-article
             if any(seg in href.lower() for seg in ["/tag/", "/about/", "/contact/"]):
                 continue
             if href in seen:
                 continue
             seen.add(href)
 
-            # Imagen: primero de la card; si no, desde la página
             card = a
             for _ in range(4):
                 if card.parent: card = card.parent
@@ -285,7 +327,6 @@ def scrape_50best(max_items: int = 24) -> List[Dict[str, Any]]:
             if not img:
                 img = fetch_meta_image(href)
 
-            # Fecha si aparece en el listado (si no, quedará None)
             time_tag = card.find("time")
             dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
             epoch = parse_epoch_from_str(dt)
@@ -331,12 +372,10 @@ def scrape_michelin(max_items: int = 24) -> List[Dict[str, Any]]:
 
             title = a.get_text(strip=True)
 
-            # Imágen de la card o, si no, desde la página del artículo
             img = _pick_img_from_tag(art.find("img"), base_url=href)
             if not img:
                 img = fetch_meta_image(href)
 
-            # Fecha si existe en el listado
             time_tag = art.find("time")
             dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
             epoch = parse_epoch_from_str(dt)
@@ -426,7 +465,6 @@ def ai_summary(title: str, summary: str, strength: str = "flash") -> str:
     return ai_summarize_cached(model, key, base_text)
 
 # -------------------- Controles UI --------------------
-# Carga de fuentes con invalidación por fingerprint y "nonce"
 if "sources_nonce" not in st.session_state:
     st.session_state.sources_nonce = 0
 
