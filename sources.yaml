@@ -1,6 +1,9 @@
 sources:
-  # ... (tus fuentes actuales)
-
-  # --- Gastronomía (scraping directo) ---
+  # --- Gastronomía (España + Global, foco tendencias) ---
   - {name: Gastroeconomy (scraped), url: scrape:gastroeconomy, category: Gastronomía}
   - {name: El Comidista (scraped), url: scrape:elcomidista, category: Gastronomía}
+  - {name: 50 Best (News), url: scrape:50best, category: Gastronomía}
+  - {name: Michelin Guide – News & Views, url: scrape:michelin, category: Gastronomía}
+
+  # Puedes mantener aquí tus otras categorías/feeds (Moda, Música, Arte/Diseño, Lifestyle, Hospitality)
+  # añadiéndolos como antes (RSS normal).
