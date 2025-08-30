@@ -205,6 +205,7 @@ def scrape_gastroeconomy(max_items: int = 24) -> List[Dict[str, Any]]:
     scope = soup.find("main") or soup.find(id="content") or soup
 
     items, seen = [], set()
+    # En portada usan h2/h3/h4 con enlaces a artículos (las categorías/tags las filtramos)
     for a in scope.select("h2 a, h3 a, h4 a"):
         href = a.get("href") or ""
         title = a.get_text(strip=True)
@@ -212,28 +213,25 @@ def scrape_gastroeconomy(max_items: int = 24) -> List[Dict[str, Any]]:
             continue
         if "gastroeconomy.com" not in href:
             continue
-        if "/category/" in href or "/tag/" in href:
+        if "/category/" in href or "/tag/" in href or "/author/" in href:
             continue
+        # Suelen llevar año en la URL
         if "/20" not in href and "/19" not in href:
             continue
         if href in seen:
             continue
         seen.add(href)
 
+        # Imagen real desde la página del artículo (evita la misma foto en todas)
+        img = fetch_meta_image(href)
+
+        # Fecha y resumen básicos desde la card
         card = a
         for _ in range(4):
             if card.parent: card = card.parent
-
-        img_tag = card.find("img")
-        img = ""
-        if img_tag:
-            img = (img_tag.get("data-src") or img_tag.get("data-lazy-src") or
-                   img_tag.get("src") or "")
-
         time_tag = card.find("time")
         dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
         epoch = parse_epoch_from_str(dt)
-
         p = card.find("p")
         summary = clean_html(p.get_text(" ", strip=True)) if p else ""
 
@@ -251,125 +249,109 @@ def scrape_gastroeconomy(max_items: int = 24) -> List[Dict[str, Any]]:
     return items
 
 @st.cache_data(ttl=10 * 60)
-def scrape_elcomidista(max_items: int = 30) -> List[Dict[str, Any]]:
-    base = "https://elpais.com/gastronomia/el-comidista/"
-    html = http_get(base)
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    scope = soup.find("main") or soup
-
-    items, seen = [], set()
-    for a in scope.select("h2 a, h3 a"):
-        href = a.get("href") or ""
-        title = a.get_text(strip=True)
-        if not href or not title:
-            continue
-        if "/gastronomia/el-comidista/" not in href:
-            continue
-        if href in seen:
-            continue
-        seen.add(href)
-
-        card = a
-        for _ in range(4):
-            if card.parent: card = card.parent
-
-        img_tag = card.find("img")
-        img = img_tag.get("src") if img_tag and img_tag.get("src","").startswith("http") else ""
-
-        time_tag = card.find("time")
-        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
-        epoch = parse_epoch_from_str(dt)
-
-        p = card.find("p")
-        summary = clean_html(p.get_text(" ", strip=True)) if p else ""
-
-        items.append({
-            "title": title,
-            "summary": summary,
-            "link": href,
-            "author": "El Comidista",
-            "epoch": epoch,
-            "image": img,
-            "feed_title": "El Comidista (scraped)"
-        })
-        if len(items) >= max_items:
-            break
-    return items
-
-@st.cache_data(ttl=10 * 60)
 def scrape_50best(max_items: int = 24) -> List[Dict[str, Any]]:
-    html = http_get("https://www.theworlds50best.com/stories/")
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
+    candidate_pages = [
+        "https://www.theworlds50best.com/stories/news",
+        "https://www.theworlds50best.com/stories/News",
+        "https://www.theworlds50best.com/stories/",
+    ]
     items, seen = [], set()
-    for a in soup.select("a[href*='/stories/']"):
-        href = a.get("href") or ""
-        title = a.get_text(strip=True)
-        if not href or not title:
+    for page in candidate_pages:
+        html = http_get(page)
+        if not html:
             continue
-        if "/stories/News/" not in href and "/stories/news/" not in href:
-            continue
-        if href.startswith("/"):
-            href = "https://www.theworlds50best.com" + href
-        if href in seen:
-            continue
-        seen.add(href)
+        soup = BeautifulSoup(html, "html.parser")
 
-        card = a
-        for _ in range(4):
-            if card.parent: card = card.parent
-        img_tag = card.find("img")
-        img = img_tag.get("src") if img_tag and img_tag.get("src","").startswith("http") else ""
+        # Anchors a stories (relajamos el filtro a cualquier /stories/)
+        for a in soup.select("a[href*='/stories/']"):
+            href = a.get("href") or ""
+            title = a.get_text(strip=True)
+            if not href or not title:
+                continue
+            if href.startswith("/"):
+                href = urljoin("https://www.theworlds50best.com", href)
+            # Evita repes y listados no-article
+            if any(seg in href.lower() for seg in ["/tag/", "/about/", "/contact/"]):
+                continue
+            if href in seen:
+                continue
+            seen.add(href)
 
-        time_tag = card.find("time")
-        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
-        epoch = parse_epoch_from_str(dt)
+            # Imagen: primero de la card; si no, desde la página
+            card = a
+            for _ in range(4):
+                if card.parent: card = card.parent
+            img = _pick_img_from_tag(card.find("img"), base_url=href)
+            if not img:
+                img = fetch_meta_image(href)
 
-        items.append({
-            "title": title,
-            "summary": "",
-            "link": href,
-            "author": "",
-            "epoch": epoch,
-            "image": img,
-            "feed_title": "50 Best (News)"
-        })
-        if len(items) >= max_items:
-            break
+            # Fecha si aparece en el listado (si no, quedará None)
+            time_tag = card.find("time")
+            dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
+            epoch = parse_epoch_from_str(dt)
+
+            items.append({
+                "title": title,
+                "summary": "",
+                "link": href,
+                "author": "",
+                "epoch": epoch,
+                "image": img,
+                "feed_title": "50 Best (Stories)"
+            })
+            if len(items) >= max_items:
+                return items
     return items
 
 @st.cache_data(ttl=10 * 60)
 def scrape_michelin(max_items: int = 24) -> List[Dict[str, Any]]:
-    html = http_get("https://guide.michelin.com/us/en/articles/news-and-views")
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    items = []
-    for art in soup.select("article")[:max_items]:
-        a = art.find("a")
-        if not a or not a.get("href"):
+    candidate_pages = [
+        "https://guide.michelin.com/en/articles/news-and-views",
+        "https://guide.michelin.com/gb/en/articles/news-and-views",
+        "https://guide.michelin.com/us/en/articles/news-and-views",
+        "https://guide.michelin.com/es/es/articulos/news-and-views",
+    ]
+    items, seen = [], set()
+    for page in candidate_pages:
+        html = http_get(page)
+        if not html:
             continue
-        href = a["href"]
-        if href.startswith("/"):
-            href = "https://guide.michelin.com" + href
-        title = a.get_text(strip=True)
-        time_tag = art.find("time")
-        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
-        epoch = parse_epoch_from_str(dt)
-        img_tag = art.find("img")
-        img = img_tag.get("src") if img_tag and img_tag.get("src","").startswith("http") else ""
-        items.append({
-            "title": title or "(sin título)",
-            "summary": "",
-            "link": href,
-            "author": "",
-            "epoch": epoch,
-            "image": img,
-            "feed_title": "Michelin (News & Views)"
-        })
+        soup = BeautifulSoup(html, "html.parser")
+
+        for art in soup.select("article"):
+            a = art.find("a")
+            if not a or not a.get("href"):
+                continue
+            href = a["href"]
+            if href.startswith("/"):
+                href = urljoin("https://guide.michelin.com", href)
+            if href in seen:
+                continue
+            seen.add(href)
+
+            title = a.get_text(strip=True)
+
+            # Imágen de la card o, si no, desde la página del artículo
+            img = _pick_img_from_tag(art.find("img"), base_url=href)
+            if not img:
+                img = fetch_meta_image(href)
+
+            # Fecha si existe en el listado
+            time_tag = art.find("time")
+            dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
+            epoch = parse_epoch_from_str(dt)
+
+            items.append({
+                "title": title or "(sin título)",
+                "summary": "",
+                "link": href,
+                "author": "",
+                "epoch": epoch,
+                "image": img,
+                "feed_title": "MICHELIN (News & Views)"
+            })
+            if len(items) >= max_items:
+                return items
     return items
 
 SCRAPERS = {
