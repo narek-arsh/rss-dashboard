@@ -1,23 +1,21 @@
-# aura_trends_app.py — Aura Trends + IA (Gemini) + Web Scraping + Filtro de Tendencia
-import time, re, hashlib, json
+
+# aura_trends_only.py — Aura Trends • Solo TENDENCIAS (con o sin IA)
+import time, re, json, hashlib
 from html import unescape
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-
-import streamlit as st
-import feedparser
-import yaml
-import requests
-from bs4 import BeautifulSoup
-from dateutil import parser as dateparser
 from urllib.parse import urljoin
 
-# -------------------- Config de página --------------------
-st.set_page_config(page_title="Aura Trends • RSS + IA + Scraping", layout="wide")
-st.title("✨ Aura Trends Dashboard")
-st.caption("Moda, música, arte/diseño, gastronomía, lifestyle/lujo y hospitality — RSS + Scraping + IA")
+import streamlit as st
+import yaml, requests, feedparser
+from bs4 import BeautifulSoup
+from dateutil import parser as dateparser
 
-# -------------------- Utilidades --------------------
+# ---------- Config ----------
+st.set_page_config(page_title="Aura Trends • Solo Tendencias", layout="wide")
+st.title("✨ Aura Trends — Solo TENDENCIAS")
+st.caption("Detección y síntesis de tendencias por vertical. Vista enfocada a señales, no a todo el feed.")
+
 DEFAULT_THUMB = "https://upload.wikimedia.org/wikipedia/commons/3/3f/Placeholder_view_vector.svg"
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
@@ -27,17 +25,19 @@ HTTP_HEADERS = {
     "Referer": "https://www.google.com/"
 }
 
+# ---------- Utils ----------
 def clean_html(raw_html: str) -> str:
     if not raw_html:
         return ""
     text = re.sub(r"<[^>]+>", "", raw_html)
     return unescape(text).strip()
 
-def to_epoch(tstruct) -> Optional[int]:
-    if not tstruct:
+def to_epoch_from_timestruct(ts) -> Optional[int]:
+    if not ts:
         return None
     try:
-        return int(time.mktime(tstruct))
+        import time as _t
+        return int(_t.mktime(ts))
     except Exception:
         return None
 
@@ -62,10 +62,19 @@ def freshness_label(epoch: Optional[int]) -> str:
         return "🆕 hoy"
     if delta < 3 * 24 * 3600:
         return "🗞️ esta semana"
-    dias = delta // 86400
-    return f"📅 hace {dias} d"
+    d = delta // 86400
+    return f"📅 hace {d} d"
 
-def first_image_from_entry(e) -> Optional[str]:
+def http_get(url: str) -> Optional[str]:
+    try:
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=15)
+        if r.status_code == 200 and r.text:
+            return r.text
+    except Exception:
+        pass
+    return None
+
+def first_image_from_entry(e) -> str:
     try:
         if hasattr(e, "media_content") and isinstance(e.media_content, list) and e.media_content:
             url = e.media_content[0].get("url")
@@ -81,97 +90,41 @@ def first_image_from_entry(e) -> Optional[str]:
             if url: return url
     except Exception:
         pass
-    return None
-
-def _pick_img_from_tag(img_tag, base_url=""):
-    if not img_tag:
-        return ""
-    for attr in ["data-src", "data-lazy-src", "data-original", "src"]:
-        val = img_tag.get(attr)
-        if val:
-            return urljoin(base_url, val)
-    srcset = img_tag.get("srcset")
-    if srcset:
-        first = srcset.split(",")[0].strip().split(" ")[0]
-        return urljoin(base_url, first)
     return ""
 
-def chunk(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
-
-def http_get(url: str) -> Optional[str]:
-    try:
-        r = requests.get(url, headers=HTTP_HEADERS, timeout=14)
-        if r.status_code == 200 and r.text:
-            return r.text
-    except Exception:
-        pass
-    return None
-
-@st.cache_data(ttl=6 * 3600)
-def fetch_meta_image(article_url: str) -> str:
-    """Abre la página del artículo y devuelve og:image/twitter:image (fallback a la primera <img>)."""
-    html = http_get(article_url)
+def pick_meta_image(url: str) -> str:
+    html = http_get(url)
     if not html:
         return ""
     soup = BeautifulSoup(html, "html.parser")
-    for sel, attr in [
-        ("meta[property='og:image']", "content"),
-        ("meta[name='og:image']", "content"),
-        ("meta[name='twitter:image:src']", "content"),
-        ("meta[name='twitter:image']", "content"),
-    ]:
+    for sel in ["meta[property='og:image']","meta[name='og:image']","meta[name='twitter:image:src']","meta[name='twitter:image']"]:
         tag = soup.select_one(sel)
-        if tag and tag.get(attr):
-            return urljoin(article_url, tag.get(attr))
+        if tag and tag.get("content"):
+            return urljoin(url, tag["content"])
     img = soup.select_one("article img, .article img, .post img, figure img")
-    return _pick_img_from_tag(img, base_url=article_url) if img else ""
+    if img and img.get("src"):
+        return urljoin(url, img.get("src"))
+    return ""
 
-# -------------------- Filtro de tendencia --------------------
-TREND_KEYWORDS = [
-    "restaurante", "restaurantes", "chef", "chefs", "hotel", "hoteles",
-    "apertura", "aperturas", "estrella michelin", "michelin", "lista",
-    "50 best", "oad", "galardón", "premio", "premios", "ranking", "menú degustación",
-    "sommelier", "bodega", "barra", "fine dining"
-]
-BORING_KEYWORDS = [
-    "receta", "recetas", "cómo hacer", "truco", "trucos", "paso a paso",
-    "ingredientes", "calorías", "microondas", "olla rápida"
-]
-
-def passes_trend_filter(title: str, summary: str) -> bool:
-    t = (title or "").lower()
-    s = (summary or "").lower()
-    if any(k in t or k in s for k in BORING_KEYWORDS):
-        return False
-    return any(k in t or k in s for k in TREND_KEYWORDS)
-
-# -------------------- Carga de fuentes (con invalidación por fingerprint) --------------------
-def _file_fingerprint(path: Path) -> str:
-    if not path.exists():
-        return "missing"
-    txt = path.read_text(encoding="utf-8")
-    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
-
+# ---------- Load sources ----------
 @st.cache_data(ttl=None)
-def load_sources_cached(fingerprint: str, nonce: int) -> List[Dict[str, str]]:
+def load_sources() -> List[Dict[str, str]]:
     p = Path("sources.yaml")
     if not p.exists():
         return []
     data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     items = data.get("sources", []) if isinstance(data, dict) else []
-    norm = []
+    out = []
     for it in items:
-        norm.append({
-            "name": str(it.get("name", "")).strip(),
-            "url": str(it.get("url", "")).strip(),
-            "category": str(it.get("category", "Otros")).strip() or "Otros",
+        out.append({
+            "name": str(it.get("name","")).strip(),
+            "url": str(it.get("url","")).strip(),
+            "category": str(it.get("category","Otros")).strip() or "Otros",
         })
-    return norm
+    return out
 
-@st.cache_data(ttl=15 * 60)
-def fetch_feed_sanitized(url: str) -> List[Dict[str, Any]]:
+@st.cache_data(ttl=15*60)
+def fetch_rss(url: str) -> List[Dict[str, Any]]:
     d = feedparser.parse(url)
     items = []
     try:
@@ -185,420 +138,225 @@ def fetch_feed_sanitized(url: str) -> List[Dict[str, Any]]:
             "summary": clean_html(getattr(e, "summary", "") or ""),
             "link": getattr(e, "link", "") or "#",
             "author": getattr(e, "author", "") or "",
-            "epoch": to_epoch(ts),
+            "epoch": to_epoch_from_timestruct(ts),
             "image": first_image_from_entry(e) or "",
             "feed_title": feed_title,
         })
     return items
 
-# -------------------- Scrapers --------------------
-@st.cache_data(ttl=10 * 60)
-def scrape_gastroeconomy(max_items: int = 24) -> List[Dict[str, Any]]:
-    url = "https://www.gastroeconomy.com/"
-    html = http_get(url)
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    scope = soup.find("main") or soup.find(id="content") or soup
-
-    items, seen = [], set()
-    for a in scope.select("h2 a, h3 a, h4 a"):
-        href = a.get("href") or ""
-        title = a.get_text(strip=True)
-        if not href or not title:
-            continue
-        if "gastroeconomy.com" not in href:
-            continue
-        if "/category/" in href or "/tag/" in href or "/author/" in href:
-            continue
-        if "/20" not in href and "/19" not in href:
-            continue
-        if href in seen:
-            continue
-        seen.add(href)
-
-        img = fetch_meta_image(href)
-
-        card = a
-        for _ in range(4):
-            if card.parent: card = card.parent
-        time_tag = card.find("time")
-        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
-        epoch = parse_epoch_from_str(dt)
-        p = card.find("p")
-        summary = clean_html(p.get_text(" ", strip=True)) if p else ""
-
-        items.append({
-            "title": title,
-            "summary": summary,
-            "link": href,
-            "author": "",
-            "epoch": epoch,
-            "image": img,
-            "feed_title": "Gastroeconomy (scraped)"
-        })
-        if len(items) >= max_items:
-            break
-    return items
-
-@st.cache_data(ttl=10 * 60)
-def scrape_elcomidista(max_items: int = 30) -> List[Dict[str, Any]]:
-    base = "https://elpais.com/gastronomia/el-comidista/"
-    html = http_get(base)
-    if not html:
-        return []
+# --- Simple scrapers (opcionales; puedes quitar si no los usas) ---
+@st.cache_data(ttl=10*60)
+def scrape_gastroeconomy(max_items=24):
+    html = http_get("https://www.gastroeconomy.com/")
+    if not html: return []
     soup = BeautifulSoup(html, "html.parser")
     scope = soup.find("main") or soup
-
-    items, seen = [], set()
-    for a in scope.select("h2 a, h3 a"):
-        href = a.get("href") or ""
-        title = a.get_text(strip=True)
-        if not href or not title:
-            continue
-        if "/gastronomia/el-comidista/" not in href:
-            continue
-        if href in seen:
-            continue
+    out, seen = [], set()
+    for a in scope.select("h2 a, h3 a, h4 a"):
+        href = a.get("href") or ""; title = a.get_text(strip=True)
+        if not href or not title: continue
+        if "/category/" in href or "/tag/" in href or "/author/" in href: continue
+        if "/20" not in href and "/19" not in href: continue
+        if href in seen: continue
         seen.add(href)
+        # meta image por artículo
+        img = pick_meta_image(href) or ""
+        out.append({"title": title, "summary": "", "link": href, "author":"", "epoch": None, "image": img, "feed_title":"Gastroeconomy (scraped)"})
+        if len(out)>=max_items: break
+    return out
 
-        card = a
-        for _ in range(4):
-            if card.parent: card = card.parent
+SCRAPERS = {"gastroeconomy": scrape_gastroeconomy}
 
-        img = ""
-        img_tag = card.find("img")
-        if img_tag:
-            img = _pick_img_from_tag(img_tag, base_url=href)
-        if not img:
-            img = fetch_meta_image(href)
+def fetch_entries(src_url: str) -> List[Dict[str, Any]]:
+    if src_url.startswith("scrape:"):
+        slug = src_url.split(":",1)[1].strip().lower()
+        func = SCRAPERS.get(slug)
+        return func() if func else []
+    return fetch_rss(src_url)
 
-        time_tag = card.find("time")
-        dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
-        epoch = parse_epoch_from_str(dt)
+# ---------- Trend engine ----------
+POS_WORDS = [
+    # acción
+    "abre","apertura","lanza","presenta","anuncia","estrena","llega","despliega","reabre","reapertura",
+    # premios/listas
+    "ganador","premio","premios","finalista","estrella michelin","michelin","50 best","ranking","lista",
+    # formato/colabo
+    "pop-up","residencia","colaboración","capsule","drop","flagship","members","club",
+]
+NEG_WORDS = ["receta","recetas","cómo hacer","truco","trucos","paso a paso","oferta","descuento","rebajas"]
 
-        p = card.find("p")
-        summary = clean_html(p.get_text(" ", strip=True)) if p else ""
-
-        items.append({
-            "title": title,
-            "summary": summary,
-            "link": href,
-            "author": "El Comidista",
-            "epoch": epoch,
-            "image": img,
-            "feed_title": "El Comidista (scraped)"
-        })
-        if len(items) >= max_items:
-            break
-    return items
-
-@st.cache_data(ttl=10 * 60)
-def scrape_50best(max_items: int = 24) -> List[Dict[str, Any]]:
-    candidate_pages = [
-        "https://www.theworlds50best.com/stories/news",
-        "https://www.theworlds50best.com/stories/News",
-        "https://www.theworlds50best.com/stories/",
-    ]
-    items, seen = [], set()
-    for page in candidate_pages:
-        html = http_get(page)
-        if not html:
-            continue
-        soup = BeautifulSoup(html, "html.parser")
-
-        for a in soup.select("a[href*='/stories/']"):
-            href = a.get("href") or ""
-            title = a.get_text(strip=True)
-            if not href or not title:
-                continue
-            if href.startswith("/"):
-                href = urljoin("https://www.theworlds50best.com", href)
-            if any(seg in href.lower() for seg in ["/tag/", "/about/", "/contact/"]):
-                continue
-            if href in seen:
-                continue
-            seen.add(href)
-
-            card = a
-            for _ in range(4):
-                if card.parent: card = card.parent
-            img = _pick_img_from_tag(card.find("img"), base_url=href)
-            if not img:
-                img = fetch_meta_image(href)
-
-            time_tag = card.find("time")
-            dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
-            epoch = parse_epoch_from_str(dt)
-
-            items.append({
-                "title": title,
-                "summary": "",
-                "link": href,
-                "author": "",
-                "epoch": epoch,
-                "image": img,
-                "feed_title": "50 Best (Stories)"
-            })
-            if len(items) >= max_items:
-                return items
-    return items
-
-@st.cache_data(ttl=10 * 60)
-def scrape_michelin(max_items: int = 24) -> List[Dict[str, Any]]:
-    candidate_pages = [
-        "https://guide.michelin.com/en/articles/news-and-views",
-        "https://guide.michelin.com/gb/en/articles/news-and-views",
-        "https://guide.michelin.com/us/en/articles/news-and-views",
-        "https://guide.michelin.com/es/es/articulos/news-and-views",
-    ]
-    items, seen = [], set()
-    for page in candidate_pages:
-        html = http_get(page)
-        if not html:
-            continue
-        soup = BeautifulSoup(html, "html.parser")
-
-        for art in soup.select("article"):
-            a = art.find("a")
-            if not a or not a.get("href"):
-                continue
-            href = a["href"]
-            if href.startswith("/"):
-                href = urljoin("https://guide.michelin.com", href)
-            if href in seen:
-                continue
-            seen.add(href)
-
-            title = a.get_text(strip=True)
-
-            img = _pick_img_from_tag(art.find("img"), base_url=href)
-            if not img:
-                img = fetch_meta_image(href)
-
-            time_tag = art.find("time")
-            dt = time_tag.get("datetime") if time_tag and time_tag.has_attr("datetime") else None
-            epoch = parse_epoch_from_str(dt)
-
-            items.append({
-                "title": title or "(sin título)",
-                "summary": "",
-                "link": href,
-                "author": "",
-                "epoch": epoch,
-                "image": img,
-                "feed_title": "MICHELIN (News & Views)"
-            })
-            if len(items) >= max_items:
-                return items
-    return items
-
-SCRAPERS = {
-    "gastroeconomy": scrape_gastroeconomy,
-    "elcomidista": scrape_elcomidista,
-    "50best": scrape_50best,
-    "michelin": scrape_michelin,
+SOURCE_WEIGHTS = {
+    # ajusta a tu gusto
+    "Skift": 2.0, "HospitalityNet": 1.8, "WWD": 1.8, "50 Best": 2.0, "MICHELIN": 2.0,
+    "Gastroeconomy": 1.6, "Dezeen":1.5, "Wallpaper":1.4, "Hypebeast":1.3, "Highsnobiety":1.3
 }
 
-def fetch_source_entries(src_url: str) -> List[Dict[str, Any]]:
-    if src_url.startswith("scrape:"):
-        slug = src_url.split(":", 1)[1].strip().lower()
-        func = SCRAPERS.get(slug)
-        if not func:
-            return []
-        return func()
-    else:
-        return fetch_feed_sanitized(src_url)
+def score_article(a: Dict[str, Any]) -> Dict[str, Any]:
+    t = (a.get("title","") + " " + a.get("summary","")).lower()
+    score = 0.0; reasons = []
+    if any(w in t for w in POS_WORDS):
+        score += 2; reasons.append("acción/premio")
+    if any(w in t for w in NEG_WORDS):
+        score -= 3; reasons.append("genérico/how-to")
 
-# -------------------- IA (Gemini) --------------------
-GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
+    # recency boost
+    ep = a.get("epoch")
+    if ep:
+        age = int(time.time()) - int(ep)
+        if age <= 24*3600: score += 3; reasons.append("muy reciente")
+        elif age <= 7*24*3600: score += 2; reasons.append("reciente")
+
+    # authority boost
+    src = a.get("feed_title") or a.get("_source_name","")
+    for k, w in SOURCE_WEIGHTS.items():
+        if k.lower() in (src or "").lower():
+            score += (w-1); reasons.append(f"autoridad:{k}")
+            break
+
+    return {"trend_score": round(score,2), "reasons": reasons}
+
+STOP = set("""a al algo algun alguna algunos algunas ante bajo cabe con contra de del desde donde
+el la los las en entre hacia hasta para por segun sin sobre tras un una unos unas y o u e que como 
+consejo esto esta este estos estas fue son ser es fue era han hay sus sus su tu tus mi mis lo le les
+""".split())
+
+def topic_key(a: Dict[str,Any]) -> str:
+    # Clave de tema simple a partir del título
+    title = (a.get("title") or "").lower()
+    words = [re.sub(r"[^a-záéíóúñ0-9]+","",w) for w in title.split()]
+    words = [w for w in words if len(w)>=4 and w not in STOP]
+    key = "-".join(words[:4]) or hashlib.md5(title.encode("utf-8")).hexdigest()[:8]
+    return key
+
+def aggregate_trends(items: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
+    buckets: Dict[str, Dict[str,Any]] = {}
+    now = int(time.time())
+    for a in items:
+        sc = score_article(a)
+        a["_trend_score"] = sc["trend_score"]
+        a["_reasons"] = sc["reasons"]
+        k = topic_key(a)
+        b = buckets.setdefault(k, {
+            "topic": k, "best_item": None, "items":[], "max_score": -999, "sources":set(), "recent":0
+        })
+        b["items"].append(a)
+        srcname = (a.get("feed_title") or a.get("_source_name") or "").strip()
+        if srcname: b["sources"].add(srcname)
+        if a.get("epoch") and (now - int(a["epoch"]) <= 14*24*3600):
+            b["recent"] += 1
+        if a["_trend_score"] > b["max_score"]:
+            b["max_score"] = a["_trend_score"]
+            b["best_item"] = a
+    # compute aggregate score
+    out = []
+    for k, b in buckets.items():
+        agg = b["max_score"] + 0.7*len(b["sources"]) + 0.3*b["recent"]
+        out.append({
+            "topic": k,
+            "score": round(agg,2),
+            "sources_n": len(b["sources"]),
+            "recent_n": b["recent"],
+            "best": b["best_item"],
+            "items": sorted(b["items"], key=lambda x: x["_trend_score"], reverse=True)[:5]
+        })
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out
+
+# ---------- IA opcional ----------
+GEMINI_KEY = st.secrets.get("GEMINI_API_KEY","")
 _SDK_OK = False
 try:
     import google.generativeai as genai
     if GEMINI_KEY:
-        genai.configure(api_key=GEMINI_KEY)
-        _SDK_OK = True
+        genai.configure(api_key=GEMINI_KEY); _SDK_OK=True
 except Exception:
-    _SDK_OK = False
+    _SDK_OK=False
 
-def _hash_key(*parts: str) -> str:
-    return hashlib.sha256("||".join(parts).encode("utf-8")).hexdigest()
-
-def _rest_generate(prompt: str, model: str = "gemini-1.5-flash") -> str:
-    if not GEMINI_KEY:
-        return ""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
-        r = requests.post(url, headers={"Content-Type": "application/json"},
-                          data=json.dumps(payload), timeout=20)
-        if r.status_code != 200:
-            return ""
-        data = r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
-        return ""
-
-@st.cache_data(ttl=7 * 24 * 3600)
-def ai_summarize_cached(model: str, key: str, base_text: str) -> str:
+@st.cache_data(ttl=3*24*3600)
+def ai_insight(text: str, model="gemini-1.5-flash") -> str:
     if not GEMINI_KEY:
         return ""
     prompt = (
-        "Eres analista de tendencias. Resume en 1–2 frases claras esta noticia para un público "
-        "profesional de hospitality y lujo. Devuelve el texto en español, sin emojis, enlaces ni HTML.\n\n"
-        f"{base_text}"
+      "Eres analista de tendencias. Resume en 1 frase clara el patrón de tendencia y el 'por qué importa' para hospitality/luxe. "
+      "Español, 18-24 palabras, sin emojis ni enlaces.\n\nTexto:\n" + text[:2200]
     )
-    if _SDK_OK:
-        try:
+    try:
+        if _SDK_OK:
             m = genai.GenerativeModel(model)
             resp = m.generate_content(prompt)
             return (resp.text or "").strip()
-        except Exception:
-            return _rest_generate(prompt, model=model)
-    else:
-        return _rest_generate(prompt, model=model)
-
-def ai_summary(title: str, summary: str, strength: str = "flash") -> str:
-    model = "gemini-1.5-flash" if strength == "flash" else "gemini-1.5-pro"
-    base_text = (title + ". " + summary)[:2200]
-    key = _hash_key(model, base_text)
-    return ai_summarize_cached(model, key, base_text)
-
-# -------------------- Controles UI --------------------
-if "sources_nonce" not in st.session_state:
-    st.session_state.sources_nonce = 0
-
-finger = _file_fingerprint(Path("sources.yaml"))
-sources = load_sources_cached(finger, st.session_state.sources_nonce)
-
-if not sources:
-    st.error("No encuentro `sources.yaml` en la raíz del repo. Súbelo con tus fuentes (RSS o scrape:slug).")
-    st.stop()
-
-categorias = sorted({s["category"] for s in sources})
-st.sidebar.header("Filtros")
-sel_cats = st.sidebar.multiselect("Categorías", categorias, default=categorias)
-max_por_fuente = st.sidebar.slider("Máximo por fuente", 3, 30, 9, 1)
-busqueda = st.sidebar.text_input("Buscar (título/resumen)...", "")
-vista = st.sidebar.radio("Vista", ["Por fuente (expanders)", "Mezclado por fecha"])
-
-st.sidebar.divider()
-trend_only = st.sidebar.toggle("🔎 Filtrar solo piezas de TENDENCIA (beta)", value=True)
-
-use_ai = st.sidebar.toggle("Usar IA (Gemini) para resumen", value=False)
-ai_model_strength = st.sidebar.radio("Modelo", ["Flash (rápido)", "Pro (más preciso)"], index=0)
-ai_strength_key = "flash" if ai_model_strength.startswith("Flash") else "pro"
-only_on_click = st.sidebar.toggle("Generar resúmenes solo al pulsar", value=True,
-                                  help="Ahorra cuota: solo genera cuando pulses el botón.")
-gen_now = st.sidebar.button("⚡ Generar resúmenes ahora")
-max_ai = st.sidebar.slider("Máx. resúmenes IA por página", 3, 60, 12, 1)
-
-st.sidebar.divider()
-st.sidebar.button("♻️ Recargar fuentes (ignorar caché)",
-                  on_click=lambda: st.session_state.__setitem__("sources_nonce", st.session_state.sources_nonce + 1))
-if st.sidebar.button("🧹 Limpiar caché (feeds + scrapers + IA)"):
-    load_sources_cached.clear()
-    fetch_feed_sanitized.clear()
-    scrape_gastroeconomy.clear()
-    scrape_elcomidista.clear()
-    scrape_50best.clear()
-    scrape_michelin.clear()
-    ai_summarize_cached.clear()
-    st.success("Caché limpiada. Pulsa Rerun (arriba) o recarga la página.")
-
-# Estado IA
-if use_ai and not GEMINI_KEY:
-    st.warning("Has activado IA, pero no encuentro GEMINI_API_KEY en Secrets.")
-if use_ai and GEMINI_KEY and not _SDK_OK:
-    st.info("Usando Gemini por API REST (SDK no disponible).")
-
-st.sidebar.caption(f"Fuentes cargadas: {len(sources)}")
-st.sidebar.caption(f"Fingerprint: {finger[:8]}…  • nonce: {st.session_state.sources_nonce}")
-
-# -------------------- Render --------------------
-def maybe_ai_summary(e, ai_counter: List[int]):
-    if not (use_ai and GEMINI_KEY):
-        return
-    should_generate = (not only_on_click) or gen_now
-    if not should_generate:
-        return
-    if ai_counter[0] >= max_ai:
-        return
-    try:
-        resumen = ai_summary(e["title"], e["summary"], strength=ai_strength_key)
-        if resumen:
-            st.caption("Resumen IA: " + resumen)
-            ai_counter[0] += 1
+        else:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
+            payload = {"contents":[{"parts":[{"text":prompt}]}]}
+            r = requests.post(url, headers={"Content-Type":"application/json"}, data=json.dumps(payload), timeout=20)
+            if r.status_code!=200: return ""
+            data = r.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception:
-        st.caption("Resumen IA: (no disponible)")
+        return ""
 
-ai_count = [0]
+# ---------- UI ----------
+sources = load_sources()
+if not sources:
+    st.error("Sube un sources.yaml con tus fuentes (RSS o scrape:gastroeconomy)."); st.stop()
 
-if vista == "Por fuente (expanders)":
-    for cat in sel_cats:
-        st.markdown(f"## {cat}")
-        cat_sources = [s for s in sources if s["category"] == cat]
-        for src in cat_sources:
-            with st.expander(f"📡 {src['name']}"):
-                entries = fetch_source_entries(src["url"])[:max_por_fuente]
-                if busqueda:
-                    q = busqueda.lower()
-                    entries = [e for e in entries if q in e["title"].lower() or q in e["summary"].lower()]
-                if trend_only:
-                    entries = [e for e in entries if passes_trend_filter(e.get("title",""), e.get("summary",""))]
-                if not entries:
-                    st.write("Sin entradas.")
-                    continue
+cats = sorted({s["category"] for s in sources})
+sel_cats = st.sidebar.multiselect("Categorías", cats, default=cats)
+max_per_src = st.sidebar.slider("Máximo por fuente", 3, 30, 10, 1)
+use_ai = st.sidebar.toggle("Añadir insight IA (Gemini)", value=False)
+trend_threshold = st.sidebar.slider("Umbral Trend Score (artículo)", -2.0, 8.0, 2.0, 0.5)
 
-                for row in chunk(entries, 3):
-                    cols = st.columns(3)
-                    for col, e in zip(cols, row):
-                        with col:
-                            img = e["image"] or DEFAULT_THUMB
-                            st.image(img, use_container_width=True)
-                            st.markdown(f"### {e['title']}")
-                            st.caption(f"{freshness_label(e['epoch'])}" + (f" · por {e['author']}" if e['author'] else ""))
-                            if e["summary"]:
-                                txt = e["summary"][:220] + ("..." if len(e["summary"]) > 220 else "")
-                                st.write(txt)
-                            maybe_ai_summary(e, ai_count)
-                            st.markdown(f"[Leer más]({e['link']})")
-                st.write("---")
+if st.sidebar.button("🧹 Limpiar caché"):
+    load_sources.clear(); fetch_rss.clear(); scrape_gastroeconomy.clear(); ai_insight.clear()
+    st.success("Caché limpia. Pulsa Rerun.")
+
+# Colecta artículos
+raw_items: List[Dict[str,Any]] = []
+for src in sources:
+    if src["category"] not in sel_cats: continue
+    for e in (fetch_entries(src["url"])[:max_per_src] or []):
+        e["_source_name"] = src["name"]
+        e["_category"] = src["category"]
+        if not e.get("image"): e["image"] = DEFAULT_THUMB
+        raw_items.append(e)
+
+# Filtra por score de artículo
+scored = []
+for a in raw_items:
+    sc = score_article(a)
+    if sc["trend_score"] >= trend_threshold:
+        a["_trend_score"] = sc["trend_score"]; a["_reasons"] = sc["reasons"]
+        scored.append(a)
+
+# Agrega en temas
+clusters = aggregate_trends(scored)
+
+st.markdown("## 🔥 Tendencias detectadas")
+if not clusters:
+    st.info("No hay suficientes señales bajo el umbral actual. Baja el umbral o añade más fuentes.")
 else:
-    # Mezclado por fecha
-    all_entries = []
-    for src in sources:
-        if src["category"] not in sel_cats:
-            continue
-        for e in fetch_source_entries(src["url"])[:max_por_fuente]:
-            e["_source_name"] = src["name"]
-            e["_category"] = src["category"]
-            all_entries.append(e)
+    for c in clusters[:30]:
+        b = c["best"]
+        with st.container(border=True):
+            cols = st.columns([1,3])
+            with cols[0]:
+                st.image(b["image"] or DEFAULT_THUMB, use_container_width=True)
+            with cols[1]:
+                st.markdown(f"### {b['title']}")
+                st.caption(f"{b.get('_category','')} · {b.get('feed_title') or b.get('_source_name','')} · {freshness_label(b.get('epoch'))}")
+                if b.get("summary"):
+                    st.write(b["summary"][:260] + ("..." if len(b["summary"])>260 else ""))
+                st.write(f"**Trend score** (tema): {c['score']} · **Fuentes**: {c['sources_n']} · **Recientes**: {c['recent_n']}")
+                st.markdown(f"[Abrir artículo]({b['link']})")
 
-    if busqueda:
-        q = busqueda.lower()
-        all_entries = [e for e in all_entries if q in e["title"].lower() or q in e["summary"].lower()]
-    if trend_only:
-        all_entries = [e for e in all_entries if passes_trend_filter(e.get("title",""), e.get("summary",""))]
+                if use_ai and GEMINI_KEY:
+                    txt = (b["title"] + ". " + (b.get("summary") or ""))
+                    insight = ai_insight(txt)
+                    if insight:
+                        st.success("Insight IA: " + insight)
 
-    all_entries.sort(key=lambda x: x["epoch"] or 0, reverse=True)
-
-    st.markdown("## Últimas publicaciones")
-    if not all_entries:
-        st.info("Sin resultados para los filtros actuales.")
-    else:
-        for row in chunk(all_entries, 3):
-            cols = st.columns(3)
-            for col, e in zip(cols, row):
-                with col:
-                    img = e["image"] or DEFAULT_THUMB
-                    st.image(img, use_container_width=True)
-                    st.markdown(f"### {e['title']}")
-                    st.caption(f"{e['_category']} · {e.get('feed_title','') or e.get('_source_name','')}"
-                               f" · {freshness_label(e['epoch'])}")
-                    if e["summary"]:
-                        txt = e["summary"][:240] + ("..." if len(e["summary"]) > 240 else "")
-                        st.write(txt)
-                    maybe_ai_summary(e, ai_count)
-                    st.markdown(f"[Leer más]({e['link']})")
-        st.write("---")
+            # Enlaces relacionados
+            if len(c["items"])>1:
+                with st.expander("Más señales relacionadas"):
+                    for x in c["items"][1:]:
+                        st.markdown(f"- [{x['title']}]({x['link']}) — {x.get('feed_title') or x.get('_source_name','')} · {freshness_label(x.get('epoch'))}")
